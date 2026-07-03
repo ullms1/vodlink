@@ -177,6 +177,64 @@ _STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
 _STREAM_LIMITS = httpx.Limits(max_keepalive_connections=0, max_connections=20)
 
 
+def _range_start_byte(range_hdr: str) -> int:
+    m = re.match(r'bytes=(\d+)-', range_hdr)
+    return int(m.group(1)) if m else 0
+
+
+async def _reconnect(dispatcharr_url: str, cache_key: str, fwd_headers: dict,
+                     resume_byte: int, max_tries: int = 5):
+    """Open a new Dispatcharr connection resuming at resume_byte.
+    Tries the existing session URL first — if Dispatcharr only dropped the TCP
+    connection (session still alive), this keeps progress tracking on the same
+    session. Falls back to creating a fresh session if the URL fails.
+    Returns (client, resp) on success, raises on failure."""
+    new_hdrs = dict(fwd_headers)
+    new_hdrs["range"] = f"bytes={resume_byte}-"
+
+    # Try existing session URL first (preserves Dispatcharr session/progress tracking)
+    cached = _session_cache.get(cache_key)
+    if cached and cached[1] > time.monotonic():
+        try:
+            sc = httpx.AsyncClient(
+                timeout=_STREAM_TIMEOUT, limits=_STREAM_LIMITS, follow_redirects=False)
+            sr = await sc.send(sc.build_request("GET", cached[0], headers=new_hdrs), stream=True)
+            if sr.status_code in (200, 206):
+                log.info("proxy reconnect [%s] reused session byte=%d", cache_key, resume_byte)
+                return sc, sr
+            await sr.aclose()
+            await sc.aclose()
+        except Exception:
+            pass  # Session truly gone — fall through to fresh session
+
+    # Session expired or failed — create a new one
+    _session_cache.pop(cache_key, None)
+    for attempt in range(max_tries):
+        new_client = None
+        try:
+            new_client = httpx.AsyncClient(
+                timeout=_STREAM_TIMEOUT, limits=_STREAM_LIMITS, follow_redirects=True)
+            req = new_client.build_request("GET", dispatcharr_url, headers=new_hdrs)
+            new_resp = await new_client.send(req, stream=True)
+            landed = str(new_resp.url)
+            if landed != dispatcharr_url:
+                _session_cache[cache_key] = (landed, time.monotonic() + _SESSION_TTL)
+            if new_resp.status_code in (200, 206):
+                return new_client, new_resp
+            log.warning("proxy reconnect [%s] attempt %d status=%d",
+                        cache_key, attempt + 1, new_resp.status_code)
+            await new_resp.aclose()
+            await new_client.aclose()
+        except Exception as exc:
+            log.warning("proxy reconnect [%s] attempt %d error: %s",
+                        cache_key, attempt + 1, exc)
+            if new_client is not None:
+                asyncio.ensure_future(new_client.aclose())
+        if attempt < max_tries - 1:
+            await asyncio.sleep(2.0)
+    raise RuntimeError(f"reconnect failed after {max_tries} attempts")
+
+
 async def _do_proxy(request: Request, dispatcharr_url: str, cache_key: str):
     """Shared proxy logic for movie and series episode streams."""
     fwd_headers = {k: v for k, v in request.headers.items()
@@ -257,23 +315,59 @@ async def _do_proxy(request: Request, dispatcharr_url: str, cache_key: str):
 
         async def body_gen():
             nonlocal bytes_sent
+            active_client = client
+            active_resp = resp
+            reconnects = 0
+            client_closed = False
+
             try:
-                async for chunk in resp.aiter_bytes(chunk_size=65536):  # 64 KB
-                    bytes_sent += len(chunk)
-                    yield chunk
-            except Exception as exc:
-                log.warning("stream body error [%s]: %s", cache_key, exc)
+                while True:
+                    try:
+                        async for chunk in active_resp.aiter_bytes(chunk_size=65536):
+                            bytes_sent += len(chunk)
+                            yield chunk
+                        break  # Natural upstream EOF — done
+                    except GeneratorExit:
+                        client_closed = True
+                        raise
+                    except Exception as exc:
+                        log.warning("stream body error [%s]: %s", cache_key, exc)
+
+                    # Dispatcharr dropped the connection mid-stream — reconnect
+                    asyncio.ensure_future(active_resp.aclose())
+                    asyncio.ensure_future(active_client.aclose())
+
+                    # Don't reconnect for short probe requests (<1MB) — those are
+                    # EOF probes/header reads that complete legitimately or fail fast.
+                    # Only reconnect for the main stream where bytes_sent is large.
+                    if bytes_sent < 1 * 1024 * 1024:
+                        break
+
+                    if reconnects >= 500:
+                        log.warning("proxy [%s] max reconnects reached", cache_key)
+                        break
+
+                    reconnects += 1
+                    resume_byte = _range_start_byte(range_hdr) + bytes_sent
+                    log.info("proxy reconnect [%s] #%d byte=%d",
+                             cache_key, reconnects, resume_byte)
+                    try:
+                        t_r = time.monotonic()
+                        active_client, active_resp = await _reconnect(
+                            dispatcharr_url, cache_key, fwd_headers, resume_byte)
+                        log.info("proxy reconnect [%s] #%d done %.0fms",
+                                 cache_key, reconnects, (time.monotonic() - t_r) * 1000)
+                    except Exception as exc:
+                        log.warning("proxy reconnect failed [%s]: %s", cache_key, exc)
+                        break
             finally:
                 total_ms = (time.monotonic() - t0) * 1000
-                log.info("proxy end [%s] %.1fKB in %.0fms",
-                         cache_key, bytes_sent / 1024, total_ms)
-                # Use ensure_future so cleanup runs even when GeneratorExit is thrown
-                # (client disconnect). Awaiting directly in a finally block during
-                # GeneratorExit is silently dropped by the async generator machinery.
-                # client.aclose() closes the TCP connection so Dispatcharr sees
-                # the stream end (it tracks at TCP level, not HTTP stream level).
-                asyncio.ensure_future(resp.aclose())
-                asyncio.ensure_future(client.aclose())
+                disc = " (client disconnect)" if client_closed else ""
+                log.info("proxy end [%s] %.1fKB in %.0fms%s",
+                         cache_key, bytes_sent / 1024, total_ms, disc)
+                # ensure_future so cleanup fires even when GeneratorExit is thrown.
+                asyncio.ensure_future(active_resp.aclose())
+                asyncio.ensure_future(active_client.aclose())
 
         return StreamingResponse(body_gen(), status_code=resp.status_code,
                                  headers=resp_headers)
