@@ -121,9 +121,12 @@ _VIDEO_EXTS = {'.mp4', '.mkv', '.ts', '.mov', '.avi', '.m4v'}
 
 def _find_download_file(dl_dir: str) -> str | None:
     try:
-        for f in sorted(os.listdir(dl_dir)):
-            if os.path.splitext(f)[1].lower() in _VIDEO_EXTS:
-                return os.path.join(dl_dir, f)
+        candidates = [
+            os.path.join(dl_dir, f) for f in os.listdir(dl_dir)
+            if os.path.splitext(f)[1].lower() in _VIDEO_EXTS
+        ]
+        if candidates:
+            return max(candidates, key=os.path.getsize)
     except OSError:
         pass
     return None
@@ -1145,6 +1148,20 @@ def list_series_episodes(tmdb_id: str):
                             if os.path.isfile(candidate):
                                 dest_path = candidate
                                 break
+                        if not dest_path and os.path.isdir(ep_dir):
+                            # Fallback: original deleted; find best re-encoded file
+                            # (largest file starting with ep_name)
+                            matches = [
+                                f for f in os.listdir(ep_dir)
+                                if f.startswith(ep_name)
+                                and os.path.splitext(f)[1].lower() in _VIDEO_EXTS
+                            ]
+                            if matches:
+                                matches.sort(
+                                    key=lambda f: os.path.getsize(os.path.join(ep_dir, f)),
+                                    reverse=True,
+                                )
+                                dest_path = os.path.join(ep_dir, matches[0])
                     episodes.append({
                         "file_path": f"{season_name}/{ep_name}",
                         "name": ep_name,
