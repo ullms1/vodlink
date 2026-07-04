@@ -67,7 +67,7 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
       </a>
 
       <div className="p-2 flex flex-col gap-1 flex-1">
-        <p className="text-xs font-medium leading-tight line-clamp-2 text-fg">{item.title}</p>
+        <p className="text-xs font-medium leading-tight line-clamp-2 text-fg" style={{ minHeight: '2.2em' }}>{item.title}</p>
         <p className="text-xs text-muted">{item.year || '—'}</p>
         {item.genres && (
           <p className="text-xs text-subtle line-clamp-1">
