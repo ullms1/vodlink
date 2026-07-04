@@ -8,21 +8,15 @@ const PLACEHOLDER = (
   </div>
 )
 
-function DownloadIcon() {
+function DownloadArrow() {
   return (
-    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
       <path d="M12 15V3m0 12-4-4m4 4 4-4M2 17v3a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-3" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   )
 }
 
-const fmtBytes = (b) => {
-  if (!b) return ''
-  if (b >= 1073741824) return `${(b / 1073741824).toFixed(1)}GB`
-  return `${(b / 1048576).toFixed(0)}MB`
-}
-
-export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downloadEntry, onDownload, onCancelDownload }) {
+export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downloadEntry, downloads, onDownload, onOpenEpisodePicker }) {
   const [busy, setBusy] = useState(false)
   const [imgErr, setImgErr] = useState(false)
 
@@ -32,11 +26,28 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
     finally { setBusy(false) }
   }
 
+  const isSeries = item.type === 'series'
+
+  // For movies: use downloadEntry state. For series: check if any episode is downloading.
+  const seriesHasActive = isSeries && downloads?.items?.some(
+    (d) => d.tmdb_id === item.tmdb_id && d.status === 'downloading'
+  )
+
   const pct = downloadEntry?.total_bytes
     ? Math.round(downloadEntry.bytes_downloaded / downloadEntry.total_bytes * 100)
     : null
 
-  const tmdbUrl = `https://www.themoviedb.org/${item.type === 'movie' ? 'movie' : 'tv'}/${item.tmdb_id}`
+  const dlStatus = downloadEntry?.status
+
+  const handleDownloadClick = () => {
+    if (isSeries) {
+      onOpenEpisodePicker(item)
+    } else {
+      onDownload(item.tmdb_id)
+    }
+  }
+
+  const tmdbUrl = `https://www.themoviedb.org/${isSeries ? 'tv' : 'movie'}/${item.tmdb_id}`
 
   return (
     <div className="bg-surface rounded-lg overflow-hidden flex flex-col border border-border">
@@ -66,43 +77,51 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
         {item.rating > 0 && (
           <p className="text-xs text-yellow-500 dark:text-yellow-400">★ {item.rating.toFixed(1)}</p>
         )}
+
+        {downloadsEnabled && (
+          <div className="mt-auto flex items-center justify-end mb-1">
+            <button
+              onClick={handleDownloadClick}
+              title="Download"
+              className={`p-1 rounded transition-colors ${
+                dlStatus === 'done' || (isSeries && !seriesHasActive && downloads?.items?.some(d => d.tmdb_id === item.tmdb_id && d.status === 'done'))
+                  ? 'text-green-500'
+                  : dlStatus === 'error'
+                    ? 'text-red-500 hover:text-red-400'
+                    : 'text-muted hover:text-blue-500'
+              }`}
+            >
+              {isSeries ? (
+                seriesHasActive
+                  ? <span className="text-blue-500 font-mono text-xs">…</span>
+                  : <DownloadArrow />
+              ) : dlStatus === 'downloading' ? (
+                <span className="font-mono text-blue-500" style={{ fontSize: '0.6rem' }}>
+                  {pct !== null ? `${pct}%` : '…'}
+                </span>
+              ) : dlStatus === 'done' ? (
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                </svg>
+              ) : dlStatus === 'error' ? (
+                <span className="font-bold text-xs">!</span>
+              ) : (
+                <DownloadArrow />
+              )}
+            </button>
+          </div>
+        )}
+
         <button onClick={handleClick} disabled={busy}
-          className={`mt-auto text-xs py-1.5 rounded font-medium transition-colors disabled:opacity-50 ${
+          className={`text-xs py-1.5 rounded font-medium transition-colors disabled:opacity-50 ${
+            !downloadsEnabled ? 'mt-auto' : ''
+          } ${
             item.linked
               ? 'bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-900 dark:hover:bg-red-800 dark:text-red-100'
               : 'bg-blue-600 hover:bg-blue-500 text-white'
           }`}>
           {busy ? '…' : item.linked ? 'Unlink' : 'Link'}
         </button>
-
-        {downloadsEnabled && item.linked && (
-          <div className="mt-1">
-            {(!downloadEntry || downloadEntry.status === 'cancelled' || downloadEntry.status === 'error') && (
-              <button
-                onClick={() => onDownload(item.tmdb_id)}
-                title={downloadEntry?.status === 'error' ? `Error: ${downloadEntry.error}` : 'Download to NAS'}
-                className="w-full text-xs py-1 rounded font-medium bg-surface border border-border text-muted hover:text-fg hover:border-blue-500 transition-colors flex items-center justify-center gap-1">
-                <DownloadIcon />
-                {downloadEntry?.status === 'error' ? 'Retry' : 'Download'}
-              </button>
-            )}
-            {downloadEntry?.status === 'downloading' && (
-              <div className="text-xs text-muted">
-                <div className="flex justify-between mb-0.5">
-                  <span>{fmtBytes(downloadEntry.bytes_downloaded)}</span>
-                  <span>{pct !== null ? `${pct}%` : '…'}</span>
-                </div>
-                <div className="h-1 bg-raised rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 transition-all duration-500"
-                    style={{ width: `${pct || 0}%` }} />
-                </div>
-              </div>
-            )}
-            {downloadEntry?.status === 'done' && (
-              <p className="text-xs text-green-600 dark:text-green-400 text-center py-0.5">✓ Downloaded</p>
-            )}
-          </div>
-        )}
       </div>
     </div>
   )

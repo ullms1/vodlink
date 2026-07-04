@@ -1040,6 +1040,83 @@ async def start_movie_download(tmdb_id: str):
     return {"download_id": download_id}
 
 
+@app.get("/api/series/{tmdb_id}/episodes")
+def list_series_episodes(tmdb_id: str):
+    item = db.get_by_tmdb("series", tmdb_id)
+    if not item:
+        raise HTTPException(404, "Not found")
+    seasons = {}
+    try:
+        for season_name in sorted(os.listdir(item["source_path"])):
+            season_path = os.path.join(item["source_path"], season_name)
+            if not os.path.isdir(season_path) or not season_name.startswith("Season"):
+                continue
+            episodes = []
+            for ep_file in sorted(os.listdir(season_path)):
+                if ep_file.endswith(".strm"):
+                    ep_name = ep_file[:-5]
+                    episodes.append({
+                        "file_path": f"{season_name}/{ep_name}",
+                        "name": ep_name,
+                    })
+            if episodes:
+                seasons[season_name] = episodes
+    except OSError:
+        pass
+    return {"seasons": [{"season": k, "episodes": v} for k, v in sorted(seasons.items())]}
+
+
+class SeriesDownloadRequest(BaseModel):
+    file_path: str
+
+
+@app.post("/api/downloads/series/{tmdb_id}")
+async def start_series_download(tmdb_id: str, req: SeriesDownloadRequest):
+    if not _DOWNLOADS_DIR:
+        raise HTTPException(400, "Downloads not configured (DOWNLOADS_DIR not set)")
+    item = db.get_by_tmdb("series", tmdb_id)
+    if not item:
+        raise HTTPException(404, "Series not found")
+    file_path = req.file_path
+    strm_path = os.path.join(item["source_path"], file_path + ".strm")
+    dispatcharr_url = None
+    try:
+        content = open(strm_path).read().strip()
+        if content.startswith("http"):
+            dispatcharr_url = _rebase_dispatcharr_url(content)
+    except OSError:
+        pass
+    if not dispatcharr_url:
+        raise HTTPException(503, "No stream URL found")
+    for e in _active_downloads.values():
+        if (e.get("tmdb_id") == tmdb_id and e.get("file_path") == file_path
+                and e["status"] == "downloading"):
+            raise HTTPException(409, "Already downloading")
+    download_id = str(uuid.uuid4())
+    cache_key = f"download:series:{tmdb_id}:{file_path}"
+    season_dir = os.path.dirname(file_path)
+    ep_stem = os.path.basename(file_path)
+    dest_dir = os.path.join(_CONTAINER_DOWNLOADS, "Series", item["dir_name"], season_dir)
+    os.makedirs(dest_dir, exist_ok=True)
+    entry: dict = {
+        "id": download_id,
+        "tmdb_id": tmdb_id,
+        "file_path": file_path,
+        "title": f"{item['title']} — {ep_stem}",
+        "year": item.get("year"),
+        "status": "downloading",
+        "bytes_downloaded": 0,
+        "total_bytes": None,
+        "dest_path": "",
+        "error": None,
+    }
+    _active_downloads[download_id] = entry
+    task = asyncio.ensure_future(
+        _do_download(download_id, dispatcharr_url, cache_key, dest_dir, ep_stem))
+    entry["_task"] = task
+    return {"download_id": download_id}
+
+
 @app.get("/api/downloads")
 def list_downloads():
     items = [{k: v for k, v in e.items() if k != "_task"}

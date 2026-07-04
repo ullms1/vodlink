@@ -7,6 +7,7 @@ import SyncModal from './components/SyncModal'
 import ScheduleModal from './components/ScheduleModal'
 import BackupModal from './components/BackupModal'
 import ConnectionModal from './components/ConnectionModal'
+import EpisodePickerModal from './components/EpisodePickerModal'
 import { useTheme } from './hooks/useTheme'
 
 function ThemeIcon({ theme }) {
@@ -48,6 +49,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [scanStatus, setScanStatus] = useState(null)
   const [downloads, setDownloads] = useState({ downloads_enabled: false, items: [] })
+  const [showTray, setShowTray] = useState(true)
+  const [episodePickerItem, setEpisodePickerItem] = useState(null)
   const searchTimer = useRef(null)
 
   const fetchResults = useCallback(async (type, q, p, lo, g, sort, dir) => {
@@ -119,14 +122,26 @@ export default function App() {
   const handleScan = (type) => fetch(`/api/scan/${type}`, { method: 'POST' })
 
   const handleDownload = async (tmdb_id) => {
-    try { await fetch(`/api/downloads/movie/${tmdb_id}`, { method: 'POST' }) } catch {}
+    try { await fetch(`/api/downloads/movie/${tmdb_id}`, { method: 'POST' }); setShowTray(true) } catch {}
   }
 
   const handleCancelDownload = async (download_id) => {
     try { await fetch(`/api/downloads/${download_id}`, { method: 'DELETE' }) } catch {}
   }
 
-  const getDownloadEntry = (tmdb_id) => downloads.items.find((d) => d.tmdb_id === tmdb_id) || null
+  const handleSeriesDownload = async (tmdb_id, file_path) => {
+    try {
+      await fetch(`/api/downloads/series/${tmdb_id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_path }),
+      })
+      setShowTray(true)
+    } catch {}
+  }
+
+  const getDownloadEntry = (tmdb_id) =>
+    downloads.items.find((d) => d.tmdb_id === tmdb_id && !d.file_path) || null
 
   const scanning = scanStatus?.running
   const isEmpty = results.items.length === 0
@@ -228,10 +243,11 @@ export default function App() {
                   key={item.tmdb_id}
                   item={item}
                   onLinkToggle={(linked) => handleLinkToggle(item, linked)}
-                  downloadsEnabled={tab === 'movie' && downloads.downloads_enabled}
+                  downloadsEnabled={downloads.downloads_enabled}
                   downloadEntry={getDownloadEntry(item.tmdb_id)}
+                  downloads={downloads}
                   onDownload={handleDownload}
-                  onCancelDownload={handleCancelDownload}
+                  onOpenEpisodePicker={setEpisodePickerItem}
                 />
               ))}
             </div>
@@ -252,13 +268,17 @@ export default function App() {
         )}
       </main>
 
-      {downloads.items.length > 0 && (
+      {showTray && downloads.items.length > 0 && (
         <div className="fixed bottom-4 right-4 z-30 w-72 bg-surface border border-border rounded-xl shadow-lg overflow-hidden">
           <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
             <span className="text-sm font-medium text-fg">Downloads</span>
-            <span className="text-xs text-muted">
-              {downloads.items.filter((d) => d.status === 'downloading').length} active
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-muted">
+                {downloads.items.filter((d) => d.status === 'downloading').length} active
+              </span>
+              <button onClick={() => setShowTray(false)}
+                className="text-muted hover:text-fg transition-colors text-base leading-none">✕</button>
+            </div>
           </div>
           <ul className="divide-y divide-border max-h-64 overflow-y-auto">
             {downloads.items.map((d) => {
@@ -301,6 +321,15 @@ export default function App() {
             })}
           </ul>
         </div>
+      )}
+
+      {episodePickerItem && (
+        <EpisodePickerModal
+          item={episodePickerItem}
+          downloads={downloads}
+          onDownload={handleSeriesDownload}
+          onClose={() => setEpisodePickerItem(null)}
+        />
       )}
 
       {syncOpen && <SyncModal onClose={() => setSyncOpen(false)} onFixed={() => fetchResults(tab, query, page, linkedOnly, genre, sortBy, sortDir)} />}
