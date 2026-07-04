@@ -1380,12 +1380,17 @@ async def start_encode(req: EncodeRequest):
     pre_input_args = []
 
     if req.hw_accel == "qsv":
+        pre_input_args = [
+            "-init_hw_device", "qsv=hw",
+            "-filter_hw_device", "hw",
+            "-hwaccel", "qsv",
+            "-hwaccel_output_format", "qsv",
+            "-c:v", "h264_qsv",
+        ]
         video_args = [
-            "-vf", f"scale=-2:{preset['height']},format=nv12",
+            "-vf", f"vpp_qsv=w=-1:h={preset['height']}",
             "-c:v", "h264_qsv",
             "-global_quality", "23",
-            "-maxrate", preset["maxrate"], "-bufsize", preset["bufsize"],
-            "-preset", "fast",
         ]
     elif req.hw_accel == "vaapi":
         pre_input_args = [

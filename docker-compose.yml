@@ -16,8 +16,8 @@ services:
       - VODLINK_BASE_URL=${VODLINK_BASE_URL:-}
       - DISPATCHARR_URL=${DISPATCHARR_URL:-}
       - DOWNLOADS_DIR=${DOWNLOADS_DIR:-}
+      - LIBVA_DRIVERS_PATH=/usr/lib/jellyfin-ffmpeg/lib/dri
       - LIBVA_DRIVER_NAME=iHD
-      - LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
     volumes:
       - ${VOD_SRC}:/vod/src:ro
       - ${VOD_DEST}:/vod/dest:rw
