@@ -85,16 +85,26 @@ export default function App() {
       try { const r = await fetch('/api/scan/status'); if (r.ok) setScanStatus(await r.json()) } catch {}
     }
     poll()
-    const id = setInterval(poll, 3000)
+    const id = setInterval(poll, 10000)
     return () => clearInterval(id)
   }, [])
 
   useEffect(() => {
+    let id
     const poll = async () => {
-      try { const r = await fetch('/api/downloads'); if (r.ok) setDownloads(await r.json()) } catch {}
+      try {
+        const r = await fetch('/api/downloads')
+        if (r.ok) {
+          const data = await r.json()
+          setDownloads(data)
+          const hasActive = data.items?.some((d) => d.status === 'downloading')
+          clearInterval(id)
+          id = setInterval(poll, hasActive ? 3000 : 30000)
+        }
+      } catch {}
     }
     poll()
-    const id = setInterval(poll, 3000)
+    id = setInterval(poll, 30000)
     return () => clearInterval(id)
   }, [])
 

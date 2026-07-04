@@ -18,10 +18,6 @@ export default function EpisodePickerModal({ item, downloads, onDownload, onClos
       .then((r) => r.json())
       .then((d) => {
         setSeasons(d.seasons || [])
-        // Expand first season by default
-        if (d.seasons?.length > 0) {
-          setExpanded({ [d.seasons[0].season]: true })
-        }
       })
       .catch(() => {})
       .finally(() => setLoading(false))

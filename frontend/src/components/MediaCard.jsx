@@ -74,16 +74,15 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
             {item.genres.split(',').slice(0, 2).join(', ')}
           </p>
         )}
-        {item.rating > 0 && (
-          <p className="text-xs text-yellow-500 dark:text-yellow-400">★ {item.rating.toFixed(1)}</p>
-        )}
-
-        {downloadsEnabled && (
-          <div className="mt-auto flex items-center justify-end mb-1">
+        <div className="flex items-center justify-between">
+          {item.rating > 0
+            ? <p className="text-xs text-yellow-500 dark:text-yellow-400">★ {item.rating.toFixed(1)}</p>
+            : <span />}
+          {downloadsEnabled && (
             <button
               onClick={handleDownloadClick}
               title="Download"
-              className={`p-1 rounded transition-colors ${
+              className={`p-0.5 rounded transition-colors ${
                 dlStatus === 'done' || (isSeries && !seriesHasActive && downloads?.items?.some(d => d.tmdb_id === item.tmdb_id && d.status === 'done'))
                   ? 'text-green-500'
                   : dlStatus === 'error'
@@ -109,13 +108,11 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
                 <DownloadArrow />
               )}
             </button>
-          </div>
-        )}
+          )}
+        </div>
 
         <button onClick={handleClick} disabled={busy}
           className={`text-xs py-1.5 rounded font-medium transition-colors disabled:opacity-50 ${
-            !downloadsEnabled ? 'mt-auto' : ''
-          } ${
             item.linked
               ? 'bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-900 dark:hover:bg-red-800 dark:text-red-100'
               : 'bg-blue-600 hover:bg-blue-500 text-white'
