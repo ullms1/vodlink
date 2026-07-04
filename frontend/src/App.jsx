@@ -47,6 +47,7 @@ export default function App() {
   const [results, setResults] = useState({ items: [], total: 0, pages: 1 })
   const [loading, setLoading] = useState(false)
   const [scanStatus, setScanStatus] = useState(null)
+  const [downloads, setDownloads] = useState({ downloads_enabled: false, items: [] })
   const searchTimer = useRef(null)
 
   const fetchResults = useCallback(async (type, q, p, lo, g, sort, dir) => {
@@ -85,6 +86,15 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
+  useEffect(() => {
+    const poll = async () => {
+      try { const r = await fetch('/api/downloads'); if (r.ok) setDownloads(await r.json()) } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 3000)
+    return () => clearInterval(id)
+  }, [])
+
   const handleSearch = (q) => {
     setQuery(q); setPage(1)
     clearTimeout(searchTimer.current)
@@ -107,6 +117,16 @@ export default function App() {
   }
 
   const handleScan = (type) => fetch(`/api/scan/${type}`, { method: 'POST' })
+
+  const handleDownload = async (tmdb_id) => {
+    try { await fetch(`/api/downloads/movie/${tmdb_id}`, { method: 'POST' }) } catch {}
+  }
+
+  const handleCancelDownload = async (download_id) => {
+    try { await fetch(`/api/downloads/${download_id}`, { method: 'DELETE' }) } catch {}
+  }
+
+  const getDownloadEntry = (tmdb_id) => downloads.items.find((d) => d.tmdb_id === tmdb_id) || null
 
   const scanning = scanStatus?.running
   const isEmpty = results.items.length === 0
@@ -204,7 +224,15 @@ export default function App() {
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
               {results.items.map((item) => (
-                <MediaCard key={item.tmdb_id} item={item} onLinkToggle={(linked) => handleLinkToggle(item, linked)} />
+                <MediaCard
+                  key={item.tmdb_id}
+                  item={item}
+                  onLinkToggle={(linked) => handleLinkToggle(item, linked)}
+                  downloadsEnabled={tab === 'movie' && downloads.downloads_enabled}
+                  downloadEntry={getDownloadEntry(item.tmdb_id)}
+                  onDownload={handleDownload}
+                  onCancelDownload={handleCancelDownload}
+                />
               ))}
             </div>
             {results.pages > 1 && (
@@ -223,6 +251,57 @@ export default function App() {
           </>
         )}
       </main>
+
+      {downloads.items.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-30 w-72 bg-surface border border-border rounded-xl shadow-lg overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
+            <span className="text-sm font-medium text-fg">Downloads</span>
+            <span className="text-xs text-muted">
+              {downloads.items.filter((d) => d.status === 'downloading').length} active
+            </span>
+          </div>
+          <ul className="divide-y divide-border max-h-64 overflow-y-auto">
+            {downloads.items.map((d) => {
+              const pct = d.total_bytes ? Math.round(d.bytes_downloaded / d.total_bytes * 100) : null
+              const fmtMB = (b) => b >= 1073741824 ? `${(b/1073741824).toFixed(1)}GB` : `${(b/1048576).toFixed(0)}MB`
+              return (
+                <li key={d.id} className="px-4 py-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-medium text-fg truncate flex-1">{d.title}</span>
+                    {d.status === 'downloading' && (
+                      <button onClick={() => handleCancelDownload(d.id)}
+                        className="text-xs text-muted hover:text-red-500 transition-colors shrink-0">✕</button>
+                    )}
+                  </div>
+                  {d.status === 'downloading' && (
+                    <>
+                      <div className="flex justify-between text-xs text-muted mt-1 mb-1">
+                        <span>{fmtMB(d.bytes_downloaded)}{d.total_bytes ? ` / ${fmtMB(d.total_bytes)}` : ''}</span>
+                        <span>{pct !== null ? `${pct}%` : '…'}</span>
+                      </div>
+                      <div className="h-1 bg-raised rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 transition-all duration-500"
+                          style={{ width: `${pct || 0}%` }} />
+                      </div>
+                    </>
+                  )}
+                  {d.status === 'done' && (
+                    <p className="text-xs text-green-600 dark:text-green-400 mt-0.5">
+                      ✓ Done — {d.total_bytes ? fmtMB(d.total_bytes) : fmtMB(d.bytes_downloaded)}
+                    </p>
+                  )}
+                  {d.status === 'error' && (
+                    <p className="text-xs text-red-500 mt-0.5 truncate" title={d.error}>Failed: {d.error}</p>
+                  )}
+                  {d.status === 'cancelled' && (
+                    <p className="text-xs text-muted mt-0.5">Cancelled</p>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
 
       {syncOpen && <SyncModal onClose={() => setSyncOpen(false)} onFixed={() => fetchResults(tab, query, page, linkedOnly, genre, sortBy, sortDir)} />}
       {scheduleOpen && <ScheduleModal onClose={() => setScheduleOpen(false)} />}

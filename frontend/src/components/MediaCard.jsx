@@ -8,7 +8,21 @@ const PLACEHOLDER = (
   </div>
 )
 
-export default function MediaCard({ item, onLinkToggle }) {
+function DownloadIcon() {
+  return (
+    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path d="M12 15V3m0 12-4-4m4 4 4-4M2 17v3a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+const fmtBytes = (b) => {
+  if (!b) return ''
+  if (b >= 1073741824) return `${(b / 1073741824).toFixed(1)}GB`
+  return `${(b / 1048576).toFixed(0)}MB`
+}
+
+export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downloadEntry, onDownload, onCancelDownload }) {
   const [busy, setBusy] = useState(false)
   const [imgErr, setImgErr] = useState(false)
 
@@ -17,6 +31,10 @@ export default function MediaCard({ item, onLinkToggle }) {
     try { await onLinkToggle(item.linked) }
     finally { setBusy(false) }
   }
+
+  const pct = downloadEntry?.total_bytes
+    ? Math.round(downloadEntry.bytes_downloaded / downloadEntry.total_bytes * 100)
+    : null
 
   const tmdbUrl = `https://www.themoviedb.org/${item.type === 'movie' ? 'movie' : 'tv'}/${item.tmdb_id}`
 
@@ -56,6 +74,35 @@ export default function MediaCard({ item, onLinkToggle }) {
           }`}>
           {busy ? '…' : item.linked ? 'Unlink' : 'Link'}
         </button>
+
+        {downloadsEnabled && item.linked && (
+          <div className="mt-1">
+            {(!downloadEntry || downloadEntry.status === 'cancelled' || downloadEntry.status === 'error') && (
+              <button
+                onClick={() => onDownload(item.tmdb_id)}
+                title={downloadEntry?.status === 'error' ? `Error: ${downloadEntry.error}` : 'Download to NAS'}
+                className="w-full text-xs py-1 rounded font-medium bg-surface border border-border text-muted hover:text-fg hover:border-blue-500 transition-colors flex items-center justify-center gap-1">
+                <DownloadIcon />
+                {downloadEntry?.status === 'error' ? 'Retry' : 'Download'}
+              </button>
+            )}
+            {downloadEntry?.status === 'downloading' && (
+              <div className="text-xs text-muted">
+                <div className="flex justify-between mb-0.5">
+                  <span>{fmtBytes(downloadEntry.bytes_downloaded)}</span>
+                  <span>{pct !== null ? `${pct}%` : '…'}</span>
+                </div>
+                <div className="h-1 bg-raised rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500 transition-all duration-500"
+                    style={{ width: `${pct || 0}%` }} />
+                </div>
+              </div>
+            )}
+            {downloadEntry?.status === 'done' && (
+              <p className="text-xs text-green-600 dark:text-green-400 text-center py-0.5">✓ Downloaded</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 import urllib.parse
+import uuid
 from contextlib import asynccontextmanager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
@@ -40,6 +41,12 @@ _SESSION_TTL = 3600.0  # 1 hour
 # key = "movie:{tmdb_id}" or "series:{tmdb_id}"
 _item_sync_cache: dict[str, float] = {}
 _item_syncing: set[str] = set()
+
+_DOWNLOADS_DIR = os.environ.get("DOWNLOADS_DIR", "")
+_CONTAINER_DOWNLOADS = "/downloads"
+# In-memory download state. Values: {id, tmdb_id, title, year, status, bytes_downloaded,
+#   total_bytes, dest_path, error, _task}. Does not survive restarts.
+_active_downloads: dict[str, dict] = {}
 
 # Stored so background threads (refresh after scan) can rewrite series .strm files.
 _vodlink_base_url: str = ""
@@ -180,6 +187,12 @@ _STREAM_LIMITS = httpx.Limits(max_keepalive_connections=0, max_connections=20)
 def _range_start_byte(range_hdr: str) -> int:
     m = re.match(r'bytes=(\d+)-', range_hdr)
     return int(m.group(1)) if m else 0
+
+
+def _ext_from_content_type(ct: str) -> str:
+    ct = ct.split(";")[0].strip().lower()
+    return {"video/mp4": ".mp4", "video/x-matroska": ".mkv",
+            "video/mp2t": ".ts", "video/quicktime": ".mov"}.get(ct, ".mkv")
 
 
 async def _reconnect(dispatcharr_url: str, cache_key: str, fwd_headers: dict,
@@ -653,6 +666,106 @@ async def _background_sync_item(media_type: str, item: dict) -> None:
         _item_syncing.discard(key)
 
 
+async def _do_download(download_id: str, dispatcharr_url: str, cache_key: str,
+                       dest_dir: str, file_stem: str) -> None:
+    """Download a VOD file from Dispatcharr to dest_dir, with burst reconnection."""
+    entry = _active_downloads[download_id]
+    t0 = time.monotonic()
+    dest_path: str | None = None
+    fp = None
+    active_client: httpx.AsyncClient | None = None
+    active_resp: httpx.Response | None = None
+
+    try:
+        active_client = httpx.AsyncClient(
+            timeout=_STREAM_TIMEOUT, limits=_STREAM_LIMITS, follow_redirects=True)
+        req = active_client.build_request("GET", dispatcharr_url, headers={})
+        active_resp = await active_client.send(req, stream=True)
+
+        landed = str(active_resp.url)
+        if landed != dispatcharr_url:
+            _session_cache[cache_key] = (landed, time.monotonic() + _SESSION_TTL)
+
+        if active_resp.status_code not in (200, 206):
+            raise RuntimeError(f"upstream status {active_resp.status_code}")
+
+        ext = _ext_from_content_type(active_resp.headers.get("content-type", ""))
+        dest_path = os.path.join(dest_dir, f"{file_stem}{ext}")
+        entry["dest_path"] = dest_path
+
+        cl = active_resp.headers.get("content-length")
+        entry["total_bytes"] = int(cl) if cl and cl.isdigit() else None
+
+        log.info("download start [%s] -> %s", cache_key, dest_path)
+        fp = open(dest_path, "wb")
+        bytes_written = 0
+        reconnects = 0
+
+        while True:
+            try:
+                async for chunk in active_resp.aiter_bytes(chunk_size=65536):
+                    fp.write(chunk)
+                    bytes_written += len(chunk)
+                    entry["bytes_downloaded"] = bytes_written
+                break  # natural upstream EOF
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("download body error [%s]: %s", cache_key, exc)
+
+            old_resp, old_client = active_resp, active_client
+            active_resp = active_client = None
+            asyncio.ensure_future(old_resp.aclose())
+            asyncio.ensure_future(old_client.aclose())
+
+            if bytes_written < 1 * 1024 * 1024 or reconnects >= 500:
+                break
+
+            reconnects += 1
+            log.info("download reconnect [%s] #%d byte=%d", cache_key, reconnects, bytes_written)
+            try:
+                active_client, active_resp = await _reconnect(
+                    dispatcharr_url, cache_key, {}, bytes_written)
+            except Exception as exc:
+                log.warning("download reconnect failed [%s]: %s", cache_key, exc)
+                break
+
+        fp.close()
+        fp = None
+        entry["bytes_downloaded"] = bytes_written
+        entry["status"] = "done"
+        log.info("download done [%s] %.1fMB in %.0fms",
+                 cache_key, bytes_written / 1024 / 1024, (time.monotonic() - t0) * 1000)
+
+    except asyncio.CancelledError:
+        entry["status"] = "cancelled"
+        log.info("download cancelled [%s]", cache_key)
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        if dest_path and os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+    except Exception as exc:
+        entry["status"] = "error"
+        entry["error"] = str(exc)
+        log.warning("download error [%s]: %s", cache_key, exc)
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+    finally:
+        if active_resp is not None:
+            asyncio.ensure_future(active_resp.aclose())
+        if active_client is not None:
+            asyncio.ensure_future(active_client.aclose())
+
+
 def _refresh_linked_files(media_type: str) -> None:
     for dir_name in _linked_dir_names(media_type):
         item = db.get_by_dir_name(media_type, dir_name)
@@ -888,6 +1001,61 @@ async def test_dispatcharr(s: ConnectionSettings):
         return {"ok": r.status_code < 400, "status_code": r.status_code}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# --- Downloads ---
+
+@app.post("/api/downloads/movie/{tmdb_id}")
+async def start_movie_download(tmdb_id: str):
+    if not _DOWNLOADS_DIR:
+        raise HTTPException(400, "Downloads not configured (DOWNLOADS_DIR not set)")
+    item = db.get_by_tmdb("movie", tmdb_id)
+    if not item:
+        raise HTTPException(404, "Movie not found")
+    dispatcharr_url = _find_strm_url(item["source_path"])
+    if not dispatcharr_url:
+        raise HTTPException(503, "No stream URL found in source")
+    for e in _active_downloads.values():
+        if e.get("tmdb_id") == tmdb_id and e["status"] == "downloading":
+            raise HTTPException(409, "Already downloading")
+    download_id = str(uuid.uuid4())
+    cache_key = f"download:movie:{tmdb_id}"
+    dest_dir = os.path.join(_CONTAINER_DOWNLOADS, "Movies", item["dir_name"])
+    os.makedirs(dest_dir, exist_ok=True)
+    entry: dict = {
+        "id": download_id,
+        "tmdb_id": tmdb_id,
+        "title": item["title"],
+        "year": item.get("year"),
+        "status": "downloading",
+        "bytes_downloaded": 0,
+        "total_bytes": None,
+        "dest_path": "",
+        "error": None,
+    }
+    _active_downloads[download_id] = entry
+    task = asyncio.ensure_future(
+        _do_download(download_id, dispatcharr_url, cache_key, dest_dir, item["dir_name"]))
+    entry["_task"] = task
+    return {"download_id": download_id}
+
+
+@app.get("/api/downloads")
+def list_downloads():
+    items = [{k: v for k, v in e.items() if k != "_task"}
+             for e in _active_downloads.values()]
+    return {"downloads_enabled": bool(_DOWNLOADS_DIR), "items": items}
+
+
+@app.delete("/api/downloads/{download_id}")
+async def cancel_download(download_id: str):
+    entry = _active_downloads.get(download_id)
+    if not entry:
+        raise HTTPException(404, "Download not found")
+    task = entry.get("_task")
+    if task and not task.done():
+        task.cancel()
+    return {"ok": True}
 
 
 # --- Serve React frontend ---
