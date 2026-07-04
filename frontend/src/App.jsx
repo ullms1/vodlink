@@ -196,7 +196,7 @@ export default function App() {
         </div>
       </header>
 
-      <div className="px-6 pt-4 flex flex-wrap items-center gap-3">
+      <div className="sticky top-[73px] z-10 bg-bg border-b border-border px-6 py-3 flex flex-wrap items-center gap-3">
         <TabNav active={tab} onChange={handleTabChange}
           counts={{ movie: scanStatus?.movie_count, series: scanStatus?.series_count }} />
 

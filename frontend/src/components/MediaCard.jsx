@@ -67,17 +67,15 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
       </a>
 
       <div className="p-2 flex flex-col gap-1 flex-1">
-        <p className="text-xs font-medium leading-tight line-clamp-2 text-fg" style={{ minHeight: '2.2em' }}>{item.title}</p>
-        <p className="text-xs text-muted">{item.year || '—'}</p>
-        {item.genres && (
-          <p className="text-xs text-subtle line-clamp-1">
-            {item.genres.split(',').slice(0, 2).join(', ')}
-          </p>
-        )}
+        <p className="text-xs font-medium leading-tight line-clamp-2 text-fg overflow-hidden" style={{ height: '2.5em' }}>{item.title}</p>
+        <p className="text-xs text-muted">{item.year || ' '}</p>
+        <p className="text-xs text-subtle line-clamp-1">
+          {item.genres ? item.genres.split(',').slice(0, 2).join(', ') : ' '}
+        </p>
         <div className="flex items-center justify-between">
-          {item.rating > 0
-            ? <p className="text-xs text-yellow-500 dark:text-yellow-400">★ {item.rating.toFixed(1)}</p>
-            : <span />}
+          <p className="text-xs text-yellow-500 dark:text-yellow-400">
+            {item.rating > 0 ? `★ ${item.rating.toFixed(1)}` : ' '}
+          </p>
           {downloadsEnabled && (
             <button
               onClick={handleDownloadClick}
