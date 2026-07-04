@@ -1392,7 +1392,7 @@ async def start_encode(req: EncodeRequest):
             "-vaapi_device", "/dev/dri/renderD128",
         ]
         video_args = [
-            "-vf", f"scale=-2:{preset['height']},format=nv12,hwupload",
+            "-vf", f"scale=-2:{preset['height']}:flags=fast_bilinear,format=nv12,hwupload",
             "-c:v", "h264_vaapi",
             "-qp", "23",
         ]
@@ -1423,6 +1423,9 @@ async def start_encode(req: EncodeRequest):
     output_dir = os.path.dirname(real_path)
     output_path = os.path.join(output_dir, f"{stem}_{req.resolution}{ext}")
 
+    map_args = ["-map", "0:v:0", "-map", "0:a:0"]
+    container_args = ["-movflags", "+faststart"] if ext == ".mp4" else []
+
     encode_id = str(uuid.uuid4())
     entry: dict = {
         "id": encode_id,
@@ -1432,6 +1435,7 @@ async def start_encode(req: EncodeRequest):
         "audio": audio_label,
         "status": "encoding",
         "progress_pct": 0,
+        "started_at": time.monotonic(),
         "input_path": real_path,
         "output_path": output_path,
         "output_size_bytes": None,
@@ -1439,15 +1443,19 @@ async def start_encode(req: EncodeRequest):
     }
     _active_encodes[encode_id] = entry
     task = asyncio.ensure_future(
-        _do_encode(encode_id, real_path, output_path, video_args + audio_args, req.duration_s, pre_input_args))
+        _do_encode(encode_id, real_path, output_path, map_args + video_args + audio_args + container_args, req.duration_s, pre_input_args))
     entry["_task"] = task
     return {"encode_id": encode_id}
 
 
 @app.get("/api/encodes")
 def list_encodes():
-    items = [{k: v for k, v in e.items() if k not in ("_task", "_proc")}
-             for e in _active_encodes.values()]
+    now = time.monotonic()
+    items = []
+    for e in _active_encodes.values():
+        item = {k: v for k, v in e.items() if k not in ("_task", "_proc", "started_at")}
+        item["elapsed_s"] = round(now - e["started_at"]) if "started_at" in e else None
+        items.append(item)
     return {"items": items}
 
 

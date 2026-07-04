@@ -403,18 +403,29 @@ export default function App() {
                       )}
                     </div>
                   </div>
-                  {e.status === 'encoding' && (
-                    <>
-                      <div className="flex justify-between text-xs text-muted mt-1 mb-1">
-                        <span>{e.audio}</span>
-                        <span>{e.progress_pct}%</span>
-                      </div>
-                      <div className="h-1 bg-raised rounded-full overflow-hidden">
-                        <div className="h-full bg-purple-500 transition-all duration-500"
-                          style={{ width: `${e.progress_pct || 0}%` }} />
-                      </div>
-                    </>
-                  )}
+                  {e.status === 'encoding' && (() => {
+                    const pct = e.progress_pct || 0
+                    const elapsed = e.elapsed_s || 0
+                    const fmtTime = (s) => s >= 3600
+                      ? `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`
+                      : `${Math.floor(s/60)}m ${s%60}s`
+                    const remaining = pct > 2 ? Math.round(elapsed * (100 - pct) / pct) : null
+                    return (
+                      <>
+                        <div className="flex justify-between text-xs text-muted mt-1">
+                          <span>{fmtTime(elapsed)} elapsed</span>
+                          <span>{remaining != null ? `~${fmtTime(remaining)} left` : ''}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className="h-1 bg-raised rounded-full overflow-hidden flex-1">
+                            <div className="h-full bg-purple-500 transition-all duration-500"
+                              style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="text-xs text-muted shrink-0">{pct}%</span>
+                        </div>
+                      </>
+                    )
+                  })()}
                   {e.status === 'done' && (
                     <p className="text-xs text-green-600 dark:text-green-400 mt-0.5">
                       ✓ Done — {e.output_size_bytes ? fmtMB(e.output_size_bytes) : ''}
