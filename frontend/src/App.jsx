@@ -8,6 +8,7 @@ import ScheduleModal from './components/ScheduleModal'
 import BackupModal from './components/BackupModal'
 import ConnectionModal from './components/ConnectionModal'
 import EpisodePickerModal from './components/EpisodePickerModal'
+import EncodeModal from './components/EncodeModal'
 import { useTheme } from './hooks/useTheme'
 
 function ThemeIcon({ theme }) {
@@ -41,6 +42,9 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
   const [linkedOnly, setLinkedOnly] = useState(false)
+  const [downloadedOnly, setDownloadedOnly] = useState(false)
+  const [encodes, setEncodes] = useState([])
+  const [encodeModalItem, setEncodeModalItem] = useState(null)
   const [genre, setGenre] = useState('')
   const [sortBy, setSortBy] = useState('title')
   const [sortDir, setSortDir] = useState('asc')
@@ -53,12 +57,13 @@ export default function App() {
   const [episodePickerItem, setEpisodePickerItem] = useState(null)
   const searchTimer = useRef(null)
 
-  const fetchResults = useCallback(async (type, q, p, lo, g, sort, dir) => {
+  const fetchResults = useCallback(async (type, q, p, lo, dlo, g, sort, dir) => {
     setLoading(true)
     try {
       const endpoint = type === 'movie' ? '/api/movies' : '/api/series'
       const params = new URLSearchParams({ q, page: p, limit: 50, sort_by: sort, sort_dir: dir })
       if (lo) params.set('linked_only', 'true')
+      if (dlo) params.set('downloaded_only', 'true')
       if (g) params.set('genre', g)
       const res = await fetch(`${endpoint}?${params}`)
       if (!res.ok) return
@@ -67,8 +72,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    fetchResults(tab, query, page, linkedOnly, genre, sortBy, sortDir)
-  }, [tab, page, linkedOnly, genre, sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
+    fetchResults(tab, query, page, linkedOnly, downloadedOnly, genre, sortBy, sortDir)
+  }, [tab, page, linkedOnly, downloadedOnly, genre, sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const endpoint = tab === 'movie' ? '/api/movies/genres' : '/api/series/genres'
@@ -108,10 +113,29 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
+  useEffect(() => {
+    let id
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/encodes')
+        if (r.ok) {
+          const data = await r.json()
+          setEncodes(data.items || [])
+          const hasActive = data.items?.some((e) => e.status === 'encoding')
+          clearInterval(id)
+          id = setInterval(poll, hasActive ? 3000 : 30000)
+        }
+      } catch {}
+    }
+    poll()
+    id = setInterval(poll, 30000)
+    return () => clearInterval(id)
+  }, [])
+
   const handleSearch = (q) => {
     setQuery(q); setPage(1)
     clearTimeout(searchTimer.current)
-    searchTimer.current = setTimeout(() => fetchResults(tab, q, 1, linkedOnly, genre, sortBy, sortDir), 300)
+    searchTimer.current = setTimeout(() => fetchResults(tab, q, 1, linkedOnly, downloadedOnly, genre, sortBy, sortDir), 300)
   }
 
   const handleTabChange = (t) => { setTab(t); setQuery(''); setPage(1); setResults({ items: [], total: 0, pages: 1 }) }
@@ -132,7 +156,11 @@ export default function App() {
   const handleScan = (type) => fetch(`/api/scan/${type}`, { method: 'POST' })
 
   const handleDownload = async (tmdb_id) => {
-    try { await fetch(`/api/downloads/movie/${tmdb_id}`, { method: 'POST' }); setShowTray(true) } catch {}
+    try {
+      await fetch(`/api/downloads/movie/${tmdb_id}`, { method: 'POST' })
+      setShowTray(true)
+      const r = await fetch('/api/downloads'); if (r.ok) setDownloads(await r.json())
+    } catch {}
   }
 
   const handleCancelDownload = async (download_id) => {
@@ -147,7 +175,16 @@ export default function App() {
         body: JSON.stringify({ file_path }),
       })
       setShowTray(true)
+      const r = await fetch('/api/downloads'); if (r.ok) setDownloads(await r.json())
     } catch {}
+  }
+
+  const handleDeleteFile = async (path) => {
+    try { await fetch(`/api/downloads/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' }) } catch {}
+  }
+
+  const handleCancelEncode = async (encode_id) => {
+    try { await fetch(`/api/encodes/${encode_id}`, { method: 'DELETE' }) } catch {}
   }
 
   const getDownloadEntry = (tmdb_id) =>
@@ -201,13 +238,24 @@ export default function App() {
           counts={{ movie: scanStatus?.movie_count, series: scanStatus?.series_count }} />
 
         <button
-          onClick={() => { setLinkedOnly((v) => !v); setPage(1) }}
+          onClick={() => { setLinkedOnly((v) => !v); setDownloadedOnly(false); setPage(1) }}
           className={`text-sm px-3 py-1.5 rounded-lg font-medium transition-colors ${
             linkedOnly ? 'bg-green-600 text-white' : 'bg-raised text-muted hover:text-fg'
           }`}
         >
           {linkedOnly ? '✓ Linked' : 'Linked'}
         </button>
+
+        {downloads.downloads_enabled && (
+          <button
+            onClick={() => { setDownloadedOnly((v) => !v); setLinkedOnly(false); setPage(1) }}
+            className={`text-sm px-3 py-1.5 rounded-lg font-medium transition-colors ${
+              downloadedOnly ? 'bg-blue-600 text-white' : 'bg-raised text-muted hover:text-fg'
+            }`}
+          >
+            {downloadedOnly ? '✓ Downloaded' : 'Downloaded'}
+          </button>
+        )}
 
         {genres.length > 0 && (
           <select value={genre} onChange={(e) => { setGenre(e.target.value); setPage(1) }}
@@ -258,6 +306,7 @@ export default function App() {
                   downloads={downloads}
                   onDownload={handleDownload}
                   onOpenEpisodePicker={setEpisodePickerItem}
+                  onOpenEncodeModal={setEncodeModalItem}
                 />
               ))}
             </div>
@@ -278,19 +327,19 @@ export default function App() {
         )}
       </main>
 
-      {showTray && downloads.items.length > 0 && (
+      {showTray && (downloads.items.length > 0 || encodes.length > 0) && (
         <div className="fixed bottom-4 right-4 z-30 w-72 bg-surface border border-border rounded-xl shadow-lg overflow-hidden">
           <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
-            <span className="text-sm font-medium text-fg">Downloads</span>
+            <span className="text-sm font-medium text-fg">Activity</span>
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted">
-                {downloads.items.filter((d) => d.status === 'downloading').length} active
+                {downloads.items.filter((d) => d.status === 'downloading').length + encodes.filter((e) => e.status === 'encoding').length} active
               </span>
               <button onClick={() => setShowTray(false)}
                 className="text-muted hover:text-fg transition-colors text-base leading-none">✕</button>
             </div>
           </div>
-          <ul className="divide-y divide-border max-h-64 overflow-y-auto">
+          <ul className="divide-y divide-border max-h-80 overflow-y-auto">
             {downloads.items.map((d) => {
               const pct = d.total_bytes ? Math.round(d.bytes_downloaded / d.total_bytes * 100) : null
               const fmtMB = (b) => b >= 1073741824 ? `${(b/1073741824).toFixed(1)}GB` : `${(b/1048576).toFixed(0)}MB`
@@ -298,10 +347,16 @@ export default function App() {
                 <li key={d.id} className="px-4 py-2.5">
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-xs font-medium text-fg truncate flex-1">{d.title}</span>
-                    {d.status === 'downloading' && (
-                      <button onClick={() => handleCancelDownload(d.id)}
-                        className="text-xs text-muted hover:text-red-500 transition-colors shrink-0">✕</button>
-                    )}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {d.status === 'done' && d.dest_path && (
+                        <button onClick={() => handleDeleteFile(d.dest_path)} title="Delete file"
+                          className="text-muted hover:text-red-500 transition-colors text-xs">🗑</button>
+                      )}
+                      {d.status === 'downloading' && (
+                        <button onClick={() => handleCancelDownload(d.id)}
+                          className="text-xs text-muted hover:text-red-500 transition-colors">✕</button>
+                      )}
+                    </div>
                   </div>
                   {d.status === 'downloading' && (
                     <>
@@ -329,6 +384,51 @@ export default function App() {
                 </li>
               )
             })}
+            {encodes.map((e) => {
+              const fmtMB = (b) => b >= 1073741824 ? `${(b/1073741824).toFixed(1)}GB` : `${(b/1048576).toFixed(0)}MB`
+              return (
+                <li key={e.id} className="px-4 py-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-medium text-fg truncate flex-1">
+                      {e.title} — {e.resolution}
+                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {e.status === 'done' && e.output_path && (
+                        <button onClick={() => handleDeleteFile(e.output_path)} title="Delete encoded file"
+                          className="text-muted hover:text-red-500 transition-colors text-xs">🗑</button>
+                      )}
+                      {e.status === 'encoding' && (
+                        <button onClick={() => handleCancelEncode(e.id)}
+                          className="text-xs text-muted hover:text-red-500 transition-colors">✕</button>
+                      )}
+                    </div>
+                  </div>
+                  {e.status === 'encoding' && (
+                    <>
+                      <div className="flex justify-between text-xs text-muted mt-1 mb-1">
+                        <span>{e.audio}</span>
+                        <span>{e.progress_pct}%</span>
+                      </div>
+                      <div className="h-1 bg-raised rounded-full overflow-hidden">
+                        <div className="h-full bg-purple-500 transition-all duration-500"
+                          style={{ width: `${e.progress_pct || 0}%` }} />
+                      </div>
+                    </>
+                  )}
+                  {e.status === 'done' && (
+                    <p className="text-xs text-green-600 dark:text-green-400 mt-0.5">
+                      ✓ Done — {e.output_size_bytes ? fmtMB(e.output_size_bytes) : ''}
+                    </p>
+                  )}
+                  {e.status === 'error' && (
+                    <p className="text-xs text-red-500 mt-0.5 truncate" title={e.error}>Failed: {e.error}</p>
+                  )}
+                  {e.status === 'cancelled' && (
+                    <p className="text-xs text-muted mt-0.5">Cancelled</p>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </div>
       )}
@@ -338,11 +438,25 @@ export default function App() {
           item={episodePickerItem}
           downloads={downloads}
           onDownload={handleSeriesDownload}
+          onOpenEncodeModal={setEncodeModalItem}
           onClose={() => setEpisodePickerItem(null)}
         />
       )}
 
-      {syncOpen && <SyncModal onClose={() => setSyncOpen(false)} onFixed={() => fetchResults(tab, query, page, linkedOnly, genre, sortBy, sortDir)} />}
+      {encodeModalItem && (
+        <EncodeModal
+          filePath={encodeModalItem.filePath}
+          title={encodeModalItem.title}
+          onClose={() => setEncodeModalItem(null)}
+          onStarted={async () => {
+            setEncodeModalItem(null)
+            setShowTray(true)
+            const r = await fetch('/api/encodes'); if (r.ok) setEncodes((await r.json()).items || [])
+          }}
+        />
+      )}
+
+      {syncOpen && <SyncModal onClose={() => setSyncOpen(false)} onFixed={() => fetchResults(tab, query, page, linkedOnly, downloadedOnly, genre, sortBy, sortDir)} />}
       {scheduleOpen && <ScheduleModal onClose={() => setScheduleOpen(false)} />}
       {backupsOpen && <BackupModal onClose={() => setBackupsOpen(false)} />}
       {connectionOpen && <ConnectionModal onClose={() => setConnectionOpen(false)} />}

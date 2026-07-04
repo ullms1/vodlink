@@ -8,7 +8,15 @@ function DownloadArrow() {
   )
 }
 
-export default function EpisodePickerModal({ item, downloads, onDownload, onClose }) {
+function EncodeIcon() {
+  return (
+    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2v-4M9 21H5a2 2 0 0 1-2-2v-4m0 0h18" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+export default function EpisodePickerModal({ item, downloads, onDownload, onOpenEncodeModal, onClose }) {
   const [seasons, setSeasons] = useState([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState({})
@@ -64,8 +72,11 @@ export default function EpisodePickerModal({ item, downloads, onDownload, onClos
 
                   {expanded[season] && (
                     <ul className="divide-y divide-border">
-                      {episodes.map(({ file_path, name }) => {
+                      {episodes.map(({ file_path, name, dest_path: fsDest }) => {
                         const entry = getEpEntry(file_path)
+                        const isDownloading = entry?.status === 'downloading'
+                        const resolvedDest = fsDest || (entry?.status === 'done' ? entry?.dest_path : null)
+                        const isDone = !!resolvedDest
                         const pct = entry?.total_bytes
                           ? Math.round(entry.bytes_downloaded / entry.total_bytes * 100)
                           : null
@@ -73,7 +84,7 @@ export default function EpisodePickerModal({ item, downloads, onDownload, onClos
                           <li key={file_path} className="flex items-center gap-3 px-3 py-2">
                             <span className="text-xs text-fg flex-1 leading-snug">{name}</span>
                             <div className="shrink-0 flex items-center gap-2">
-                              {entry?.status === 'downloading' && (
+                              {isDownloading && (
                                 <div className="w-16">
                                   <div className="flex justify-between text-xs text-muted mb-0.5">
                                     <span>{pct !== null ? `${pct}%` : '…'}</span>
@@ -84,10 +95,17 @@ export default function EpisodePickerModal({ item, downloads, onDownload, onClos
                                   </div>
                                 </div>
                               )}
-                              {entry?.status === 'done' && (
-                                <span className="text-xs text-green-600 dark:text-green-400 font-medium">✓ Done</span>
+                              {!isDownloading && isDone && (
+                                <button
+                                  onClick={() => onOpenEncodeModal?.({ filePath: resolvedDest, title: `${item.title} — ${name}` })}
+                                  title="Re-encode"
+                                  className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-raised transition-colors group"
+                                >
+                                  <span className="text-xs text-green-600 dark:text-green-400 font-medium">✓ Done</span>
+                                  <span className="text-muted group-hover:text-purple-500 transition-colors"><EncodeIcon /></span>
+                                </button>
                               )}
-                              {(!entry || entry.status === 'cancelled' || entry.status === 'error') && (
+                              {!isDownloading && !isDone && (
                                 <button
                                   onClick={() => onDownload(item.tmdb_id, file_path)}
                                   title={entry?.status === 'error' ? `Failed: ${entry.error} — retry` : 'Download'}

@@ -16,7 +16,15 @@ function DownloadArrow() {
   )
 }
 
-export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downloadEntry, downloads, onDownload, onOpenEpisodePicker }) {
+function EncodeIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2v-4M9 21H5a2 2 0 0 1-2-2v-4m0 0h18" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+
+export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downloadEntry, downloads, onDownload, onOpenEpisodePicker, onOpenEncodeModal }) {
   const [busy, setBusy] = useState(false)
   const [imgErr, setImgErr] = useState(false)
 
@@ -38,11 +46,13 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
     : null
 
   const dlStatus = downloadEntry?.status
+  // Filesystem-based: survives container restarts. Preferred over in-memory dlStatus.
+  const downloadedPath = !isSeries ? (item.download_path || (dlStatus === 'done' ? downloadEntry?.dest_path : null)) : null
 
   const handleDownloadClick = () => {
     if (isSeries) {
       onOpenEpisodePicker(item)
-    } else {
+    } else if (!downloadedPath) {
       onDownload(item.tmdb_id)
     }
   }
@@ -77,35 +87,38 @@ export default function MediaCard({ item, onLinkToggle, downloadsEnabled, downlo
             {item.rating > 0 ? `★ ${item.rating.toFixed(1)}` : ' '}
           </p>
           {downloadsEnabled && (
-            <button
-              onClick={handleDownloadClick}
-              title="Download"
-              className={`p-0.5 rounded transition-colors ${
-                dlStatus === 'done' || (isSeries && !seriesHasActive && downloads?.items?.some(d => d.tmdb_id === item.tmdb_id && d.status === 'done'))
-                  ? 'text-green-500'
-                  : dlStatus === 'error'
-                    ? 'text-red-500 hover:text-red-400'
-                    : 'text-muted hover:text-blue-500'
-              }`}
-            >
-              {isSeries ? (
-                seriesHasActive
-                  ? <span className="text-blue-500 font-mono text-xs">…</span>
-                  : <DownloadArrow />
+            <div className="flex items-center gap-0.5">
+              {!isSeries && downloadedPath ? (
+                <button
+                  onClick={() => onOpenEncodeModal?.({ filePath: downloadedPath, title: item.title })}
+                  title="Re-encode"
+                  className="p-0.5 rounded text-purple-500 hover:text-purple-400 transition-colors"
+                >
+                  <EncodeIcon />
+                </button>
+              ) : isSeries ? (
+                <button onClick={handleDownloadClick} title={item.has_downloads ? 'View episodes' : 'Download episodes'}
+                  className={`p-0.5 rounded transition-colors ${item.has_downloads ? 'text-green-500 hover:text-green-400' : 'text-muted hover:text-blue-500'}`}>
+                  {seriesHasActive
+                    ? <span className="text-blue-500 font-mono text-xs">…</span>
+                    : item.has_downloads
+                      ? <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                      : <DownloadArrow />}
+                </button>
               ) : dlStatus === 'downloading' ? (
-                <span className="font-mono text-blue-500" style={{ fontSize: '0.6rem' }}>
+                <span className="font-mono text-blue-500 p-0.5" style={{ fontSize: '0.6rem' }}>
                   {pct !== null ? `${pct}%` : '…'}
                 </span>
-              ) : dlStatus === 'done' ? (
-                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                </svg>
               ) : dlStatus === 'error' ? (
-                <span className="font-bold text-xs">!</span>
+                <button onClick={handleDownloadClick} title="Retry download"
+                  className="p-0.5 rounded text-red-500 hover:text-red-400 transition-colors font-bold text-xs">!</button>
               ) : (
-                <DownloadArrow />
+                <button onClick={handleDownloadClick} title="Download"
+                  className="p-0.5 rounded text-muted hover:text-blue-500 transition-colors">
+                  <DownloadArrow />
+                </button>
               )}
-            </button>
+            </div>
           )}
         </div>
 

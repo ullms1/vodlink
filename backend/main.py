@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import time
 import urllib.parse
 import uuid
@@ -47,6 +49,9 @@ _CONTAINER_DOWNLOADS = "/downloads"
 # In-memory download state. Values: {id, tmdb_id, title, year, status, bytes_downloaded,
 #   total_bytes, dest_path, error, _task}. Does not survive restarts.
 _active_downloads: dict[str, dict] = {}
+# In-memory encode state. Values: {id, title, resolution, audio, status, progress_pct,
+#   input_path, output_path, output_size_bytes, error, _task, _proc}.
+_active_encodes: dict[str, dict] = {}
 
 # Stored so background threads (refresh after scan) can rewrite series .strm files.
 _vodlink_base_url: str = ""
@@ -111,9 +116,37 @@ def _is_linked(dp: str) -> bool:
     return os.path.exists(dp) or os.path.islink(dp)
 
 
+_VIDEO_EXTS = {'.mp4', '.mkv', '.ts', '.mov', '.avi', '.m4v'}
+
+
+def _find_download_file(dl_dir: str) -> str | None:
+    try:
+        for f in sorted(os.listdir(dl_dir)):
+            if os.path.splitext(f)[1].lower() in _VIDEO_EXTS:
+                return os.path.join(dl_dir, f)
+    except OSError:
+        pass
+    return None
+
+
 def _enrich(item: dict, media_type: str) -> dict:
     dp = _dest_path(media_type, item["dir_name"])
-    return {**item, "linked": _is_linked(dp)}
+    result = {**item, "linked": _is_linked(dp), "download_path": None}
+    if _DOWNLOADS_DIR:
+        if media_type == "movie":
+            dl_dir = os.path.join(_CONTAINER_DOWNLOADS, "Movies", item["dir_name"])
+            dl_path = _find_download_file(dl_dir)
+            result["download_path"] = dl_path
+            if not dl_path and os.path.isdir(dl_dir):
+                try:
+                    if not os.listdir(dl_dir):
+                        os.rmdir(dl_dir)
+                except OSError:
+                    pass
+        else:
+            dl_dir = os.path.join(_CONTAINER_DOWNLOADS, "Series", item["dir_name"])
+            result["has_downloads"] = _has_video_file(dl_dir)
+    return result
 
 
 def _linked_dir_names(media_type: str) -> list[str]:
@@ -123,6 +156,40 @@ def _linked_dir_names(media_type: str) -> list[str]:
                 if _is_linked(os.path.join(dest, d))]
     except OSError:
         return []
+
+
+def _has_video_file(dl_dir: str) -> bool:
+    """Recursively check if any video file exists under dl_dir."""
+    try:
+        for root, _dirs, files in os.walk(dl_dir):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in _VIDEO_EXTS:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _downloaded_dir_names(media_type: str) -> list[str]:
+    subdir = "Movies" if media_type == "movie" else "Series"
+    base = os.path.join(_CONTAINER_DOWNLOADS, subdir)
+    result = []
+    try:
+        for d in os.listdir(base):
+            dl_dir = os.path.join(base, d)
+            if not os.path.isdir(dl_dir):
+                continue
+            if _has_video_file(dl_dir):
+                result.append(d)
+            else:
+                try:
+                    if not os.listdir(dl_dir):
+                        os.rmdir(dl_dir)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return result
 
 
 def _rebase_dispatcharr_url(url: str) -> str:
@@ -439,11 +506,18 @@ def series_genres():
 @app.get("/api/movies")
 def list_movies(
     q: str = "", page: int = 1, limit: int = 50,
-    linked_only: bool = False, genre: str = "", sort_by: str = "title", sort_dir: str = "asc"
+    linked_only: bool = False, downloaded_only: bool = False,
+    genre: str = "", sort_by: str = "title", sort_dir: str = "asc"
 ):
     if linked_only:
+        dir_names = _linked_dir_names("movie")
+    elif downloaded_only:
+        dir_names = _downloaded_dir_names("movie")
+    else:
+        dir_names = None
+    if dir_names is not None:
         rows, total = db.search_media_by_dir_names(
-            "movie", _linked_dir_names("movie"), q, page, limit, genre, sort_by, sort_dir
+            "movie", dir_names, q, page, limit, genre, sort_by, sort_dir
         )
     else:
         rows, total = db.search_media("movie", q, page, limit, genre, sort_by, sort_dir)
@@ -458,11 +532,18 @@ def list_movies(
 @app.get("/api/series")
 def list_series(
     q: str = "", page: int = 1, limit: int = 50,
-    linked_only: bool = False, genre: str = "", sort_by: str = "title", sort_dir: str = "asc"
+    linked_only: bool = False, downloaded_only: bool = False,
+    genre: str = "", sort_by: str = "title", sort_dir: str = "asc"
 ):
     if linked_only:
+        dir_names = _linked_dir_names("series")
+    elif downloaded_only:
+        dir_names = _downloaded_dir_names("series")
+    else:
+        dir_names = None
+    if dir_names is not None:
         rows, total = db.search_media_by_dir_names(
-            "series", _linked_dir_names("series"), q, page, limit, genre, sort_by, sort_dir
+            "series", dir_names, q, page, limit, genre, sort_by, sort_dir
         )
     else:
         rows, total = db.search_media("series", q, page, limit, genre, sort_by, sort_dir)
@@ -1045,6 +1126,7 @@ def list_series_episodes(tmdb_id: str):
     item = db.get_by_tmdb("series", tmdb_id)
     if not item:
         raise HTTPException(404, "Not found")
+    dl_series_dir = os.path.join(_CONTAINER_DOWNLOADS, "Series", item["dir_name"]) if _DOWNLOADS_DIR else None
     seasons = {}
     try:
         for season_name in sorted(os.listdir(item["source_path"])):
@@ -1055,9 +1137,18 @@ def list_series_episodes(tmdb_id: str):
             for ep_file in sorted(os.listdir(season_path)):
                 if ep_file.endswith(".strm"):
                     ep_name = ep_file[:-5]
+                    dest_path = None
+                    if dl_series_dir:
+                        ep_dir = os.path.join(dl_series_dir, season_name)
+                        for ext in _VIDEO_EXTS:
+                            candidate = os.path.join(ep_dir, ep_name + ext)
+                            if os.path.isfile(candidate):
+                                dest_path = candidate
+                                break
                     episodes.append({
                         "file_path": f"{season_name}/{ep_name}",
                         "name": ep_name,
+                        "dest_path": dest_path,
                     })
             if episodes:
                 seasons[season_name] = episodes
@@ -1124,11 +1215,247 @@ def list_downloads():
     return {"downloads_enabled": bool(_DOWNLOADS_DIR), "items": items}
 
 
+@app.delete("/api/downloads/file")
+async def delete_download_file(path: str):
+    real_path = os.path.realpath(path)
+    if not real_path.startswith(os.path.realpath(_CONTAINER_DOWNLOADS) + os.sep):
+        raise HTTPException(400, "Path outside downloads directory")
+    if not os.path.isfile(real_path):
+        raise HTTPException(404, "File not found")
+    os.remove(real_path)
+    return {"ok": True}
+
+
 @app.delete("/api/downloads/{download_id}")
 async def cancel_download(download_id: str):
     entry = _active_downloads.get(download_id)
     if not entry:
         raise HTTPException(404, "Download not found")
+    task = entry.get("_task")
+    if task and not task.done():
+        task.cancel()
+    return {"ok": True}
+
+
+# --- Encodes ---
+
+_VIDEO_PRESETS = {
+    "4K":    {"height": 2160, "maxrate": "15000k", "bufsize": "30000k"},
+    "1080p": {"height": 1080, "maxrate": "3500k",  "bufsize": "7000k"},
+    "720p":  {"height": 720,  "maxrate": "2000k",  "bufsize": "4000k"},
+    "480p":  {"height": 480,  "maxrate": "1200k",  "bufsize": "2400k"},
+}
+
+
+async def _do_encode(encode_id: str, input_path: str, output_path: str,
+                     ffmpeg_args: list, duration_s: float,
+                     pre_input_args: list | None = None) -> None:
+    entry = _active_encodes[encode_id]
+    proc = None
+    try:
+        cmd = ["ffmpeg", "-loglevel", "error"] + (pre_input_args or []) + ["-i", input_path] + ffmpeg_args + [
+            "-progress", "pipe:1", "-y", output_path]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        entry["_proc"] = proc
+
+        async def drain_stderr():
+            return await proc.stderr.read()
+
+        stderr_task = asyncio.ensure_future(drain_stderr())
+
+        async for raw in proc.stdout:
+            line = raw.decode().strip()
+            if line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    if duration_s > 0:
+                        entry["progress_pct"] = min(99, int(us / (duration_s * 1_000_000) * 100))
+                except ValueError:
+                    pass
+
+        await proc.wait()
+        stderr_bytes = await stderr_task
+
+        if proc.returncode == 0:
+            entry["status"] = "done"
+            entry["progress_pct"] = 100
+            entry["output_size_bytes"] = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            log.info("encode done [%s] -> %s", encode_id, output_path)
+        else:
+            entry["status"] = "error"
+            entry["error"] = stderr_bytes.decode(errors="replace")[-200:].strip() or "ffmpeg error"
+            log.warning("encode failed [%s]: %s", encode_id, entry["error"])
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+    except asyncio.CancelledError:
+        entry["status"] = "cancelled"
+        if proc and proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+    except Exception as exc:
+        entry["status"] = "error"
+        entry["error"] = str(exc)
+        log.warning("encode error [%s]: %s", encode_id, exc)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+
+
+@app.get("/api/encode/probe")
+async def encode_probe(path: str):
+    real_path = os.path.realpath(path)
+    if not real_path.startswith(os.path.realpath(_CONTAINER_DOWNLOADS) + os.sep):
+        raise HTTPException(400, "Path outside downloads directory")
+    if not os.path.isfile(real_path):
+        raise HTTPException(404, "File not found")
+    cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
+           "-show_format", "-show_streams", real_path]
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: subprocess.run(cmd, capture_output=True, text=True))
+    if result.returncode != 0:
+        raise HTTPException(500, f"ffprobe failed: {result.stderr[:200]}")
+    data = json.loads(result.stdout)
+    fmt = data.get("format", {})
+    duration_s = float(fmt.get("duration", 0))
+    size_bytes = int(fmt.get("size", 0)) or os.path.getsize(real_path)
+    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+    audio_bitrate_kbps = max(64, int(audio.get("bit_rate", 0)) // 1000) if audio.get("bit_rate") else 128
+    siblings = []
+    try:
+        parent = os.path.dirname(real_path)
+        fname = os.path.basename(real_path)
+        for f in sorted(os.listdir(parent)):
+            if f == fname:
+                continue
+            fp = os.path.join(parent, f)
+            if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in _VIDEO_EXTS:
+                siblings.append({"name": f, "path": fp, "size": os.path.getsize(fp)})
+    except OSError:
+        pass
+    return {
+        "duration_s": duration_s,
+        "source_width": video.get("width", 0),
+        "source_height": video.get("height", 0),
+        "source_size_bytes": size_bytes,
+        "source_audio_bitrate_kbps": audio_bitrate_kbps,
+        "siblings": siblings,
+    }
+
+
+class EncodeRequest(BaseModel):
+    path: str
+    resolution: str
+    audio_codec: str
+    audio_bitrate: int | None = None
+    duration_s: float = 0.0
+    hw_accel: str | None = None  # "qsv", "vaapi", or None for software
+
+_VIDEO_BITRATES = {"4K": 12000, "1080p": 3000, "720p": 1500, "480p": 800}
+
+@app.post("/api/encode")
+async def start_encode(req: EncodeRequest):
+    real_path = os.path.realpath(req.path)
+    if not real_path.startswith(os.path.realpath(_CONTAINER_DOWNLOADS) + os.sep):
+        raise HTTPException(400, "Path outside downloads directory")
+    if not os.path.isfile(real_path):
+        raise HTTPException(404, "File not found")
+    if req.resolution not in _VIDEO_PRESETS:
+        raise HTTPException(400, f"Unknown resolution: {req.resolution}")
+
+    preset = _VIDEO_PRESETS[req.resolution]
+    pre_input_args = []
+
+    if req.hw_accel == "qsv":
+        video_args = [
+            "-vf", f"scale=-2:{preset['height']},format=nv12",
+            "-c:v", "h264_qsv",
+            "-global_quality", "23",
+            "-maxrate", preset["maxrate"], "-bufsize", preset["bufsize"],
+            "-preset", "fast",
+        ]
+    elif req.hw_accel == "vaapi":
+        pre_input_args = [
+            "-vaapi_device", "/dev/dri/renderD128",
+        ]
+        video_args = [
+            "-vf", f"scale=-2:{preset['height']},format=nv12,hwupload",
+            "-c:v", "h264_vaapi",
+            "-qp", "23",
+        ]
+    else:
+        video_args = [
+            "-vf", f"scale=-2:{preset['height']}",
+            "-c:v", "libx264", "-crf", "23",
+            "-maxrate", preset["maxrate"], "-bufsize", preset["bufsize"],
+            "-preset", "fast",
+        ]
+
+    if req.audio_codec == "copy":
+        audio_args = ["-c:a", "copy"]
+        ext = ".mkv"
+        audio_label = "Copy"
+    elif req.audio_codec == "ac3":
+        bitrate = req.audio_bitrate or 384
+        audio_args = ["-c:a", "ac3", "-b:a", f"{bitrate}k"]
+        ext = ".mkv"
+        audio_label = f"AC3 {bitrate}k"
+    else:
+        bitrate = req.audio_bitrate or 192
+        audio_args = ["-c:a", "aac", "-b:a", f"{bitrate}k"]
+        ext = ".mp4"
+        audio_label = f"AAC {bitrate}k"
+
+    stem = os.path.splitext(os.path.basename(real_path))[0]
+    output_dir = os.path.dirname(real_path)
+    output_path = os.path.join(output_dir, f"{stem}_{req.resolution}{ext}")
+
+    encode_id = str(uuid.uuid4())
+    entry: dict = {
+        "id": encode_id,
+        "title": stem,
+        "resolution": req.resolution,
+        "hw_accel": req.hw_accel,
+        "audio": audio_label,
+        "status": "encoding",
+        "progress_pct": 0,
+        "input_path": real_path,
+        "output_path": output_path,
+        "output_size_bytes": None,
+        "error": None,
+    }
+    _active_encodes[encode_id] = entry
+    task = asyncio.ensure_future(
+        _do_encode(encode_id, real_path, output_path, video_args + audio_args, req.duration_s, pre_input_args))
+    entry["_task"] = task
+    return {"encode_id": encode_id}
+
+
+@app.get("/api/encodes")
+def list_encodes():
+    items = [{k: v for k, v in e.items() if k not in ("_task", "_proc")}
+             for e in _active_encodes.values()]
+    return {"items": items}
+
+
+@app.delete("/api/encodes/{encode_id}")
+async def cancel_encode(encode_id: str):
+    entry = _active_encodes.get(encode_id)
+    if not entry:
+        raise HTTPException(404, "Encode not found")
     task = entry.get("_task")
     if task and not task.done():
         task.cancel()

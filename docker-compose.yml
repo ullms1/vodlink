@@ -16,9 +16,15 @@ services:
       - VODLINK_BASE_URL=${VODLINK_BASE_URL:-}
       - DISPATCHARR_URL=${DISPATCHARR_URL:-}
       - DOWNLOADS_DIR=${DOWNLOADS_DIR:-}
+      - LIBVA_DRIVER_NAME=iHD
+      - LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
     volumes:
       - ${VOD_SRC}:/vod/src:ro
       - ${VOD_DEST}:/vod/dest:rw
       - ${DATA_DIR:-/volume1/docker/vodlink/data}:/app/data:rw
       - ${DOWNLOADS_DIR:-/tmp/vodlink-downloads}:/downloads:rw
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "937"
     restart: unless-stopped
