@@ -143,6 +143,7 @@ export default function EncodeModal({ filePath, title, onClose, onStarted }) {
                 { value: null, label: 'Software' },
                 { value: 'qsv', label: 'QSV' },
                 { value: 'vaapi', label: 'VAAPI' },
+                { value: 'nvenc', label: 'NVENC' },
               ].map(({ value, label }) => (
                 <button key={label} onClick={() => setHwAccel(value)}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${

@@ -1401,6 +1401,18 @@ async def start_encode(req: EncodeRequest):
             "-c:v", "h264_vaapi",
             "-qp", "23",
         ]
+    elif req.hw_accel == "nvenc":
+        pre_input_args = [
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
+            "-c:v", "h264_cuvid",
+        ]
+        video_args = [
+            "-vf", f"scale_cuda=-2:{preset['height']}",
+            "-c:v", "h264_nvenc",
+            "-cq", "23",
+            "-preset", "p4",
+        ]
     else:
         video_args = [
             "-vf", f"scale=-2:{preset['height']}",
