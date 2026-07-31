@@ -51,15 +51,15 @@ def parse_nfo(nfo_path: str) -> dict:
         genres = [g.text for g in root.findall("genre") if g.text]
         thumb = root.find("thumb")
 
-        # 1. Look for <tmdbid>
-        tmdb_id = root.findtext("tmdbid") or root.findtext("tmdb_id") or ""
+        # 1. Look for <tmdbid> or <tvdbid>
+        tmdb_id = root.findtext("tmdbid") or root.findtext("tmdb_id") or root.findtext("tvdbid") or ""
 
-        # 2. Look for <uniqueid type="tmdb">
+        # 2. Look for <uniqueid>
         if not tmdb_id:
             for uid in root.findall("uniqueid"):
-                if uid.get("type") in ("tmdb", "imdb", "tvdb"):
+                if uid.get("type") in ("tmdb", "tvdb", "imdb"):
                     tmdb_id = uid.text or ""
-                    if uid.get("type") == "tmdb":
+                    if uid.get("type") in ("tmdb", "tvdb"):
                         break
 
         # 3. Fallback to basic <id>
@@ -86,28 +86,6 @@ def parse_nfo(nfo_path: str) -> dict:
         return {}
 
 
-def _find_nfo_in_files(files: list[str], dir_path: str, is_series: bool) -> str | None:
-    """Helper to locate the appropriate NFO file from a list of filenames in a folder."""
-    if is_series and "tvshow.nfo" in files:
-        return os.path.join(dir_path, "tvshow.nfo")
-
-    # Common movie NFO names
-    for common_name in ("movie.nfo", "Movie.nfo"):
-        if common_name in files:
-            return os.path.join(dir_path, common_name)
-
-    # Folder-matched NFO name (e.g. "Movie Title (2023).nfo")
-    dir_base = os.path.basename(dir_path)
-    name_part = dir_base.split(" {")[0] if " {" in dir_base else dir_base
-    expected_nfo = name_part + ".nfo"
-    if expected_nfo in files:
-        return os.path.join(dir_path, expected_nfo)
-
-    # Fallback: grab any .nfo file in the folder
-    nfos = [f for f in files if f.endswith(".nfo")]
-    return os.path.join(dir_path, nfos[0]) if nfos else None
-
-
 def _scan(media_type: str, full: bool = False):
     norm_type = media_type.lower().strip()
     is_series = norm_type in ("series", "tv", "shows")
@@ -132,19 +110,45 @@ def _scan(media_type: str, full: bool = False):
             scan_state["error"] = f"Source directory does not exist: {src}"
             return
 
-        # 1. Walk the tree to collect all folders containing NFO files
         media_folders: list[tuple[str, str]] = []  # [(dir_path, nfo_path)]
 
-        for root, _, files in os.walk(src):
-            nfo_path = _find_nfo_in_files(files, root, is_series)
-            if nfo_path:
-                media_folders.append((root, nfo_path))
+        if is_series:
+            # SERIES SCAN: Walk until tvshow.nfo is found, then skip subdirectories (Seasons/Episodes)
+            for root, dirs, files in os.walk(src):
+                if "tvshow.nfo" in files:
+                    nfo_path = os.path.join(root, "tvshow.nfo")
+                    media_folders.append((root, nfo_path))
+                    dirs.clear()  # Stop traversing deeper into Season/Episode subfolders!
+        else:
+            # MOVIE SCAN: Look for movie-level NFOs
+            for root, _, files in os.walk(src):
+                nfo_file = None
+                # Check standard names first
+                for common_name in ("movie.nfo", "Movie.nfo"):
+                    if common_name in files:
+                        nfo_file = common_name
+                        break
+
+                if not nfo_file:
+                    dir_base = os.path.basename(root)
+                    name_part = dir_base.split(" {")[0] if " {" in dir_base else dir_base
+                    expected_nfo = name_part + ".nfo"
+                    if expected_nfo in files:
+                        nfo_file = expected_nfo
+
+                # Fallback: take top-level NFO only if it's not starting with digits
+                if not nfo_file:
+                    nfos = [f for f in files if f.endswith(".nfo")]
+                    if nfos:
+                        nfo_file = nfos[0]
+
+                if nfo_file:
+                    media_folders.append((root, os.path.join(root, nfo_file)))
 
         scan_state["total"] = len(media_folders)
         processed: set[str] = set()
         to_upsert: list[dict] = []
 
-        # 2. Process each media directory found
         for i, (dir_path, nfo_path) in enumerate(media_folders):
             scan_state["progress"] = i + 1
 
@@ -155,13 +159,11 @@ def _scan(media_type: str, full: bool = False):
 
             processed.add(dir_path)
 
-            # Skip unchanged entries (mtime check on the NFO file)
             if not full and dir_path in existing and existing[dir_path] == mtime:
                 continue
 
             parsed = parse_nfo(nfo_path)
 
-            # Fallback title from directory name if XML title is missing
             if not parsed.get("title"):
                 parsed["title"] = os.path.basename(dir_path)
 
@@ -181,7 +183,7 @@ def _scan(media_type: str, full: bool = False):
         if to_upsert:
             db.upsert_media_batch(to_upsert)
 
-        # Remove DB rows for deleted directories
+        # Remove deleted folders from database
         removed = [p for p in existing if p not in processed]
         if removed:
             db.delete_by_paths(removed)
