@@ -48,12 +48,23 @@ def parse_nfo(nfo_path: str) -> dict:
         root = tree.getroot()
         genres = [g.text for g in root.findall("genre") if g.text]
         thumb = root.find("thumb")
+        
+        # Check standard <tmdbid> tag first
+        tmdb_id = root.findtext("tmdbid") or ""
+        
+        # Fallback: check modern Kodi/Emby/Jellyfin <uniqueid type="tmdb"> tag
+        if not tmdb_id:
+            for uid in root.findall("uniqueid"):
+                if uid.get("type") == "tmdb":
+                    tmdb_id = uid.text or ""
+                    break
+
         return {
             "title": root.findtext("title") or "",
             "year": int(root.findtext("year") or 0),
             "genres": ",".join(genres),
             "rating": float(root.findtext("rating") or 0),
-            "tmdb_id": root.findtext("tmdbid") or "",
+            "tmdb_id": tmdb_id,
             "thumb_url": (thumb.text if thumb is not None else "") or "",
         }
     except Exception:
@@ -63,20 +74,27 @@ def parse_nfo(nfo_path: str) -> dict:
 def _find_nfo(dir_path: str, media_type: str) -> str | None:
     if media_type == "series":
         p = os.path.join(dir_path, "tvshow.nfo")
-        return p if os.path.exists(p) else None
+        if os.path.exists(p):
+            return p
 
-    # Movie: dir name is "Title (Year) {tmdb-ID}" — find matching .nfo
+    # Check common standard NFO names first
+    for common_name in ("movie.nfo", "Movie.nfo"):
+        p = os.path.join(dir_path, common_name)
+        if os.path.exists(p):
+            return p
+
+    # Movie: check matching directory name NFO (e.g. "Movie Title (2023).nfo")
     dir_base = os.path.basename(dir_path)
     name_part = dir_base.split(" {")[0] if " {" in dir_base else dir_base
     p = os.path.join(dir_path, name_part + ".nfo")
     if os.path.exists(p):
         return p
 
-    # Fallback: any top-level .nfo that isn't an episode file
+    # Fallback: find any top-level .nfo file in the folder
     try:
         nfos = [
             f for f in os.listdir(dir_path)
-            if f.endswith(".nfo") and not f[0].isdigit()
+            if f.endswith(".nfo") and os.path.isfile(os.path.join(dir_path, f))
         ]
         return os.path.join(dir_path, nfos[0]) if nfos else None
     except OSError:
