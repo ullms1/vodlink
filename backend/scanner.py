@@ -44,24 +44,40 @@ _lock = threading.Lock()
 
 def parse_nfo(nfo_path: str) -> dict:
     try:
-        tree = ET.parse(nfo_path)
-        root = tree.getroot()
+        # Read file text to handle potential XML encoding/parsing quirks gracefully
+        with open(nfo_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        root = ET.fromstring(content)
         genres = [g.text for g in root.findall("genre") if g.text]
         thumb = root.find("thumb")
-        
-        # Check standard <tmdbid> tag first
-        tmdb_id = root.findtext("tmdbid") or ""
-        
-        # Fallback: check modern Kodi/Emby/Jellyfin <uniqueid type="tmdb"> tag
+
+        # 1. Look for <tmdbid>
+        tmdb_id = root.findtext("tmdbid") or root.findtext("tmdb_id") or ""
+
+        # 2. Look for <uniqueid type="tmdb">
         if not tmdb_id:
             for uid in root.findall("uniqueid"):
-                if uid.get("type") == "tmdb":
+                if uid.get("type") in ("tmdb", "imdb", "tvdb"):
                     tmdb_id = uid.text or ""
-                    break
+                    if uid.get("type") == "tmdb":
+                        break  # Prefer TMDB if available
+
+        # 3. Fallback to basic <id>
+        if not tmdb_id:
+            tmdb_id = root.findtext("id") or ""
+
+        title = root.findtext("title") or ""
+        year = 0
+        try:
+            year_text = root.findtext("year") or root.findtext("premiered") or ""
+            year = int(year_text[:4]) if year_text else 0
+        except ValueError:
+            year = 0
 
         return {
-            "title": root.findtext("title") or "",
-            "year": int(root.findtext("year") or 0),
+            "title": title,
+            "year": year,
             "genres": ",".join(genres),
             "rating": float(root.findtext("rating") or 0),
             "tmdb_id": tmdb_id,
@@ -71,26 +87,26 @@ def parse_nfo(nfo_path: str) -> dict:
         return {}
 
 
-def _find_nfo(dir_path: str, media_type: str) -> str | None:
-    if media_type == "series":
+def _find_nfo(dir_path: str, is_series: bool) -> str | None:
+    if is_series:
         p = os.path.join(dir_path, "tvshow.nfo")
         if os.path.exists(p):
             return p
 
-    # Check common standard NFO names first
+    # Common movie NFO names
     for common_name in ("movie.nfo", "Movie.nfo"):
         p = os.path.join(dir_path, common_name)
         if os.path.exists(p):
             return p
 
-    # Movie: check matching directory name NFO (e.g. "Movie Title (2023).nfo")
+    # Folder-matched NFO name
     dir_base = os.path.basename(dir_path)
     name_part = dir_base.split(" {")[0] if " {" in dir_base else dir_base
     p = os.path.join(dir_path, name_part + ".nfo")
     if os.path.exists(p):
         return p
 
-    # Fallback: find any top-level .nfo file in the folder
+    # Fallback to any .nfo in folder
     try:
         nfos = [
             f for f in os.listdir(dir_path)
@@ -102,26 +118,30 @@ def _find_nfo(dir_path: str, media_type: str) -> str | None:
 
 
 def _scan(media_type: str, full: bool = False):
-    src = MOVIES_SRC if media_type == "movie" else SERIES_SRC
+    # Normalize media type strings
+    norm_type = media_type.lower().strip()
+    is_series = norm_type in ("series", "tv", "shows")
+    clean_type = "series" if is_series else "movie"
+    src = SERIES_SRC if is_series else MOVIES_SRC
 
     with _lock:
         if scan_state["running"]:
             return
         scan_state.update(
             running=True,
-            current_type=media_type,
+            current_type=clean_type,
             progress=0,
             total=0,
             error=None,
         )
 
     try:
-        existing = {} if full else db.get_all_source_paths(media_type)
+        existing = {} if full else db.get_all_source_paths(clean_type)
 
         try:
             entries = sorted(os.listdir(src))
         except OSError as e:
-            scan_state["error"] = str(e)
+            scan_state["error"] = f"Source directory unreachable ({src}): {e}"
             return
 
         dirs = [
@@ -134,27 +154,31 @@ def _scan(media_type: str, full: bool = False):
 
         for i, dir_path in enumerate(dirs):
             scan_state["progress"] = i + 1
+
+            nfo_path = _find_nfo(dir_path, is_series)
+            if not nfo_path:
+                continue
+
             try:
-                mtime = os.stat(dir_path).st_mtime
+                # Use NFO modified time for accuracy instead of directory mtime
+                mtime = os.stat(nfo_path).st_mtime
             except OSError:
                 continue
 
             processed.add(dir_path)
 
-            # Skip unchanged entries (mtime check)
+            # Skip unchanged entries
             if not full and dir_path in existing and existing[dir_path] == mtime:
                 continue
 
-            nfo_path = _find_nfo(dir_path, media_type)
-            if not nfo_path:
-                continue
-
             parsed = parse_nfo(nfo_path)
-            if not parsed.get("tmdb_id") or not parsed.get("title"):
-                continue
+
+            # Fallback title from directory if XML title is missing
+            if not parsed.get("title"):
+                parsed["title"] = os.path.basename(dir_path)
 
             to_upsert.append({
-                "type": media_type,
+                "type": clean_type,
                 **parsed,
                 "source_path": dir_path,
                 "dir_name": os.path.basename(dir_path),
@@ -169,12 +193,12 @@ def _scan(media_type: str, full: bool = False):
         if to_upsert:
             db.upsert_media_batch(to_upsert)
 
-        # Remove DB rows for directories that no longer exist
+        # Clean up database entries for deleted folders
         removed = [p for p in existing if p not in processed]
         if removed:
             db.delete_by_paths(removed)
 
-        key = "last_scan_movies" if media_type == "movie" else "last_scan_series"
+        key = "last_scan_movies" if not is_series else "last_scan_series"
         scan_state[key] = time.time()
         _save_persisted()
 
